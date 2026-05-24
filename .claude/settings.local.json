@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python damper_simulation.py)",
+      "Bash(pip install *)",
+      "Bash(PYTHONIOENCODING=utf-8 python damper_simulation.py)"
+    ]
+  }
+}
