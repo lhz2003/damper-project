@@ -184,6 +184,21 @@ def compute_metrics(t, x, v, F, N_settle):
     }
 
 
+# -- Chirp / Frequency Sweep Excitation ---------------------------------------
+def generate_chirp(X0, f_start, f_end, duration, dt):
+    """Linear frequency sweep (chirp) signal.
+
+    Instantaneous frequency ramps linearly from f_start to f_end.
+    Returns t, x, v, f_inst arrays.
+    """
+    t = np.arange(0, duration, dt)
+    f_inst = f_start + (f_end - f_start) * t / duration
+    phase = 2 * np.pi * (f_start * t + 0.5 * (f_end - f_start) * t ** 2 / duration)
+    x = X0 * np.sin(phase)
+    v = 2 * np.pi * X0 * f_inst * np.cos(phase)
+    return t, x, v, f_inst
+
+
 # -- Plotting -----------------------------------------------------------------
 def plot_all(models_results, params):
     """Generate four-panel comparison figure."""
@@ -323,68 +338,328 @@ def plot_individual_hysteresis(models_results, metrics, params):
     print(f"  已保存: {path}")
 
 
+# -- Simulation helper --------------------------------------------------------
+def simulate_all_models(t, x, v, c, k, alpha, alpha_z_bw, A_bw, beta_bw, gamma_bw, n_bw):
+    """Run all five damper models on the given excitation. Returns {name: (tag, F)}."""
+    results = {}
+    results["线性粘性 (Linear Viscous)"] = ("LV", linear_viscous(v, c))
+    results["非线性粘性 (Nonlinear)"] = ("NLV", nonlinear_viscous(v, c, alpha))
+    results["Kelvin-Voigt"] = ("KV", kelvin_voigt(x, v, k, c))
+    results["Maxwell"] = ("MX", simulate_maxwell(t, v, c, k))
+    F_bw, _ = simulate_bouc_wen(t, x, v, c, k, alpha_z_bw, A_bw, beta_bw, gamma_bw, n_bw)
+    results["Bouc-Wen"] = ("BW", F_bw)
+    return results
+
+
+# -- Scenario 2: Chirp / Frequency Sweep --------------------------------------
+def run_chirp_sweep(c, k, alpha, A_bw, beta_bw, gamma_bw, n_bw):
+    print("\n" + "=" * 65)
+    print("  工况2: 扫频激励 (Chirp Signal)")
+    print("=" * 65)
+
+    X0 = 0.025
+    f_start, f_end = 0.1, 5.0
+    duration = 20.0
+    dt = 1e-3
+
+    print(f"  X0={X0*1e3:.0f} mm,  频率 {f_start} -> {f_end} Hz,  持续 {duration} s,  dt={dt*1e3:.0f} ms")
+
+    t, x, v, f_inst = generate_chirp(X0, f_start, f_end, duration, dt)
+    alpha_z_bw = k * X0 * 0.6
+
+    print("  正在仿真所有模型 ...", end=" ")
+    results = simulate_all_models(t, x, v, c, k, alpha, alpha_z_bw, A_bw, beta_bw, gamma_bw, n_bw)
+    print("完成")
+
+    # -- Plot: 4-panel comparison with color-mapped frequency -----------------
+    fig = plt.figure(figsize=(15, 12))
+    gs = GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.30)
+
+    colors = {
+        "线性粘性 (Linear Viscous)": "#1f77b4",
+        "非线性粘性 (Nonlinear)": "#ff7f0e",
+        "Kelvin-Voigt": "#2ca02c",
+        "Maxwell": "#d62728",
+        "Bouc-Wen": "#9467bd",
+    }
+
+    ax_fd = fig.add_subplot(gs[0, 0])
+    ax_fv = fig.add_subplot(gs[0, 1])
+    ax_ft = fig.add_subplot(gs[1, 0])
+    ax_if = fig.add_subplot(gs[1, 1])
+
+    # Downsample for cleaner scatter plots
+    step = max(1, len(t) // 4000)
+
+    for name, (_, F) in results.items():
+        color = colors.get(name, "gray")
+        f_norm = (f_inst - f_start) / (f_end - f_start)
+
+        ax_fd.scatter(x[::step] * 1e3, F[::step] * 1e-3, c=f_norm[::step],
+                      cmap="plasma", s=2, alpha=0.6, label=name)
+        ax_fv.scatter(v[::step], F[::step] * 1e-3, c=f_norm[::step],
+                      cmap="plasma", s=2, alpha=0.6, label=name)
+        ax_ft.plot(t, F * 1e-3, color=color, lw=0.8, label=name)
+
+    ax_fd.set_xlabel("位移 [mm]")
+    ax_fd.set_ylabel("阻尼力 [kN]")
+    ax_fd.set_title("力-位移 扫频响应 (颜色=瞬时频率)")
+    ax_fd.legend(fontsize=7, loc="upper left")
+    ax_fd.grid(True, alpha=0.3)
+
+    ax_fv.set_xlabel("速度 [m/s]")
+    ax_fv.set_ylabel("阻尼力 [kN]")
+    ax_fv.set_title("力-速度 扫频响应 (颜色=瞬时频率)")
+    ax_fv.legend(fontsize=7)
+    ax_fv.grid(True, alpha=0.3)
+
+    ax_ft.set_xlabel("时间 [s]")
+    ax_ft.set_ylabel("阻尼力 [kN]")
+    ax_ft.set_title("力 时程曲线")
+    ax_ft.legend(fontsize=7)
+    ax_ft.grid(True, alpha=0.3)
+
+    ax_if.plot(t, f_inst, color="black", lw=1.5)
+    ax_if.set_xlabel("时间 [s]")
+    ax_if.set_ylabel("瞬时频率 [Hz]")
+    ax_if.set_title("瞬时频率")
+    ax_if.grid(True, alpha=0.3)
+
+    fig.suptitle(
+        f"扫频激励对比  |  X0={X0*1e3:.0f} mm,  "
+        f"f: {f_start} -> {f_end} Hz,  T={duration:.0f} s",
+        fontsize=13, y=1.01,
+    )
+    path = os.path.join(OUTPUT_DIR, "chirp_comparison.png")
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"  已保存: {path}")
+
+    # -- Plot: individual model sweep hysteresis -------------------------------
+    n = len(results)
+    ncols = min(3, n)
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4.5 * nrows))
+    if n == 1:
+        axes = np.array([[axes]])
+    elif axes.ndim == 1:
+        axes = axes.reshape(1, -1)
+
+    for idx, (name, (_, F)) in enumerate(results.items()):
+        ax = axes[idx // ncols, idx % ncols]
+        color = colors.get(name, "gray")
+        f_norm = (f_inst - f_start) / (f_end - f_start)
+
+        sc = ax.scatter(x[::step] * 1e3, F[::step] * 1e-3, c=f_norm[::step],
+                        cmap="plasma", s=2, alpha=0.6)
+        ax.set_xlabel("位移 [mm]")
+        ax.set_ylabel("阻尼力 [kN]")
+        ax.set_title(name)
+        ax.grid(True, alpha=0.3)
+        cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("归一化频率", fontsize=7)
+
+    for idx in range(n, nrows * ncols):
+        axes[idx // ncols, idx % ncols].set_visible(False)
+
+    fig.suptitle(
+        f"各模型扫频滞回曲线  |  X0={X0*1e3:.0f} mm,  "
+        f"f: {f_start} -> {f_end} Hz",
+        fontsize=13,
+    )
+    fig.tight_layout()
+    path = os.path.join(OUTPUT_DIR, "chirp_individual_hysteresis.png")
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"  已保存: {path}")
+
+
+# -- Scenario 3: Multi-Frequency Comparison -----------------------------------
+def run_multi_freq(c, k, alpha, A_bw, beta_bw, gamma_bw, n_bw):
+    print("\n" + "=" * 65)
+    print("  工况3: 多频率对比")
+    print("=" * 65)
+
+    X0 = 0.025
+    freqs = [0.2, 0.5, 1.0, 2.0, 3.0, 5.0]
+    dt = 2e-4
+    n_cycles = 8
+    settle_cycles = 2
+
+    model_names = [
+        "线性粘性 (Linear Viscous)",
+        "非线性粘性 (Nonlinear)",
+        "Kelvin-Voigt",
+        "Maxwell",
+        "Bouc-Wen",
+    ]
+    model_colors = {
+        "线性粘性 (Linear Viscous)": "#1f77b4",
+        "非线性粘性 (Nonlinear)": "#ff7f0e",
+        "Kelvin-Voigt": "#2ca02c",
+        "Maxwell": "#d62728",
+        "Bouc-Wen": "#9467bd",
+    }
+    model_markers = {
+        "线性粘性 (Linear Viscous)": "o",
+        "非线性粘性 (Nonlinear)": "s",
+        "Kelvin-Voigt": "D",
+        "Maxwell": "^",
+        "Bouc-Wen": "v",
+    }
+
+    # Collect metrics for each model at each frequency
+    all_metrics = {name: {"f": [], "Ed": [], "F_max": [], "K_eq": [], "xi_eq": [], "eta": []}
+                   for name in model_names}
+
+    for fi, freq in enumerate(freqs):
+        print(f"  频率 {freq:.1f} Hz ({fi+1}/{len(freqs)}) ...", end=" ")
+        t, x, v, N_settle = generate_excitation(X0, freq, dt, n_cycles, settle_cycles)
+        alpha_z_bw = k * X0 * 0.6
+        results = simulate_all_models(t, x, v, c, k, alpha, alpha_z_bw, A_bw, beta_bw, gamma_bw, n_bw)
+
+        for name, (_, F) in results.items():
+            met = compute_metrics(t, x, v, F, N_settle)
+            if met is not None:
+                all_metrics[name]["f"].append(freq)
+                all_metrics[name]["Ed"].append(met["Ed"])
+                all_metrics[name]["F_max"].append(met["F_max"] * 1e-3)
+                all_metrics[name]["K_eq"].append(met["K_eq"] * 1e-6)
+                all_metrics[name]["xi_eq"].append(
+                    met["xi_eq"] if not np.isinf(met["xi_eq"]) else np.nan
+                )
+                all_metrics[name]["eta"].append(
+                    met["eta"] if not np.isinf(met["eta"]) else np.nan
+                )
+        print("完成")
+
+    # -- Print summary table ---------------------------------------------------
+    print("\n" + "-" * 100)
+    print(f"  {'频率':>6s} | {'模型':<28s} | {'Ed [J]':>10s} | {'Fmax [kN]':>10s} | "
+          f"{'Keq [MN/m]':>12s} | {'xi_eq [%]':>10s} | {'eta':>8s}")
+    print("-" * 100)
+    for freq in freqs:
+        first = True
+        for name in model_names:
+            idx = list(all_metrics[name]["f"]).index(freq)
+            xi_val = all_metrics[name]["xi_eq"][idx]
+            eta_val = all_metrics[name]["eta"][idx]
+            xi_str = "    inf" if np.isnan(xi_val) else f"{xi_val*100:7.1f}"
+            eta_str = "    inf" if np.isnan(eta_val) else f"{eta_val:7.3f}"
+            label = f"{freq:5.1f} Hz" if first else "      "
+            print(f"  {label:>6s} | {name:<28s} | {all_metrics[name]['Ed'][idx]:10.2f} | "
+                  f"{all_metrics[name]['F_max'][idx]:10.2f} | "
+                  f"{all_metrics[name]['K_eq'][idx]:12.3f} | {xi_str:>10s} | {eta_str:>8s}")
+            first = False
+        print("-" * 100)
+
+    # -- Plot: 4-panel frequency-dependent metrics -----------------------------
+    fig, axes = plt.subplots(2, 2, figsize=(13, 10))
+    metric_keys = [
+        ("Ed", "每循环耗能 Ed [J]"),
+        ("K_eq", "等效刚度 Keq [MN/m]"),
+        ("xi_eq", "等效阻尼比 xi_eq [%]"),
+        ("F_max", "最大阻尼力 Fmax [kN]"),
+    ]
+
+    for (key, ylabel), ax in zip(metric_keys, axes.flat):
+        for name in model_names:
+            f_vals = np.array(all_metrics[name]["f"])
+            m_vals = np.array(all_metrics[name][key])
+            if key == "xi_eq":
+                m_vals = m_vals * 100  # convert to percent
+            valid = ~np.isnan(m_vals)
+            if np.any(valid):
+                ax.plot(f_vals[valid], m_vals[valid],
+                        color=model_colors[name], marker=model_markers[name],
+                        markersize=6, lw=1.5, label=name, markerfacecolor="white")
+        ax.set_xlabel("频率 [Hz]")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=6)
+
+    fig.suptitle(
+        f"阻尼器性能指标随频率变化  |  X0={X0*1e3:.0f} mm",
+        fontsize=13,
+    )
+    fig.tight_layout()
+    path = os.path.join(OUTPUT_DIR, "multi_freq_metrics.png")
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"\n  已保存: {path}")
+
+    # -- Plot: hysteresis overlay at each frequency for Maxwell & Bouc-Wen ----
+    fig, axes = plt.subplots(2, len(freqs), figsize=(3.2 * len(freqs), 7))
+    for row, (name, tag) in enumerate([("Maxwell", "MX"), ("Bouc-Wen", "BW")]):
+        for col, freq in enumerate(freqs):
+            ax = axes[row, col]
+            t, x, v, N_settle = generate_excitation(X0, freq, dt, n_cycles, settle_cycles)
+            alpha_z_bw = k * X0 * 0.6
+            res = simulate_all_models(t, x, v, c, k, alpha, alpha_z_bw, A_bw, beta_bw, gamma_bw, n_bw)
+            _, F = res[name]
+
+            # Last 2 cycles
+            T_cyc = 1.0 / freq
+            n_last = int(2 * T_cyc / dt)
+            ax.plot(x[-n_last:] * 1e3, F[-n_last:] * 1e-3,
+                    color=model_colors[name], lw=1.0)
+            ax.fill(x[-n_last:] * 1e3, F[-n_last:] * 1e-3,
+                    color=model_colors[name], alpha=0.1)
+            if row == 0:
+                ax.set_title(f"{freq:.1f} Hz", fontsize=9)
+            if col == 0:
+                ax.set_ylabel(f"{name}\n阻尼力 [kN]", fontsize=8)
+            if row == 1:
+                ax.set_xlabel("位移 [mm]", fontsize=8)
+            ax.tick_params(labelsize=7)
+            ax.grid(True, alpha=0.3)
+
+    fig.suptitle("Maxwell 与 Bouc-Wen 滞回曲线随频率演化", fontsize=13)
+    fig.tight_layout()
+    path = os.path.join(OUTPUT_DIR, "multi_freq_hysteresis.png")
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"  已保存: {path}")
+
+
 # -- Main ---------------------------------------------------------------------
 def main():
-    # -- Excitation parameters -------------------------------------------------
-    X0 = 0.025          # displacement amplitude [m]
-    f = 1.0             # frequency [Hz]
-    dt = 5e-4           # time step [s]
-    n_cycles = 6        # total cycles simulated
-    settle_cycles = 1   # cycles dropped for steady-state
-
-    t, x, v, N_settle = generate_excitation(X0, f, dt, n_cycles, settle_cycles)
-
-    # Store excitation for plotting
-    params = {"X0": X0, "f": f, "dt": dt, "n_cycles": n_cycles,
-              "t": t, "x": x, "v": v}
-
-    # -- Damper parameters -----------------------------------------------------
-    c = 80e3     # viscous coefficient [N*s/m]
-    k = 2000e3   # stiffness [N/m]
-    alpha = 0.4  # nonlinear exponent
+    # -- Damper parameters (shared across all scenarios) ------------------------
+    c = 80e3       # viscous coefficient [N*s/m]
+    k = 2000e3     # stiffness [N/m]
+    alpha = 0.4    # nonlinear exponent
 
     # Bouc-Wen parameters
     A_bw = 1.0
     beta_bw = 0.5
     gamma_bw = 0.5
     n_bw = 2
-    alpha_z_bw = k * X0 * 0.6  # scale to ~60% of elastic force
 
-    # -- Simulate each model ---------------------------------------------------
+    # =========================================================================
+    #  工况1: 单频正弦激励
+    # =========================================================================
     print("=" * 65)
-    print("  流体阻尼器理论模型仿真")
+    print("  工况1: 单频正弦激励")
+    print("=" * 65)
+
+    X0 = 0.025
+    f = 1.0
+    dt = 5e-4
+    n_cycles = 6
+    settle_cycles = 1
+
     print(f"  位移幅值 X0 = {X0*1e3:.0f} mm,  频率 f = {f:.1f} Hz,  循环数 = {n_cycles}")
-    print("=" * 65)
 
-    results = {}
+    t, x, v, N_settle = generate_excitation(X0, f, dt, n_cycles, settle_cycles)
+    params = {"X0": X0, "f": f, "dt": dt, "n_cycles": n_cycles,
+              "t": t, "x": x, "v": v}
+    alpha_z_bw = k * X0 * 0.6
 
-    print("\n[1/5] 线性粘性模型 ...........................", end=" ")
-    F_lin = linear_viscous(v, c)
-    results["线性粘性 (Linear Viscous)"] = ("LV", F_lin)
+    print("  正在仿真所有模型 ...", end=" ")
+    results = simulate_all_models(t, x, v, c, k, alpha, alpha_z_bw, A_bw, beta_bw, gamma_bw, n_bw)
     print("完成")
 
-    print(f"[2/5] 非线性粘性模型 (alpha={alpha:.2f}) ................", end=" ")
-    F_nl = nonlinear_viscous(v, c, alpha)
-    results["非线性粘性 (Nonlinear)"] = ("NLV", F_nl)
-    print("完成")
-
-    print("[3/5] Kelvin-Voigt 模型 ......................", end=" ")
-    F_kv = kelvin_voigt(x, v, k, c)
-    results["Kelvin-Voigt"] = ("KV", F_kv)
-    print("完成")
-
-    print("[4/5] Maxwell 模型 (ODE) .....................", end=" ")
-    F_mx = simulate_maxwell(t, v, c, k)
-    results["Maxwell"] = ("MX", F_mx)
-    print("完成")
-
-    print("[5/5] Bouc-Wen 模型 (ODE) ....................", end=" ")
-    F_bw, z_bw = simulate_bouc_wen(t, x, v, c, k, alpha_z_bw,
-                                   A_bw, beta_bw, gamma_bw, n_bw)
-    results["Bouc-Wen"] = ("BW", F_bw)
-    print("完成")
-
-    # -- Compute performance metrics -------------------------------------------
+    # Metrics
     print("\n" + "-" * 65)
     print("  性能指标 (基于最后一个稳态循环)")
     print("-" * 65)
@@ -416,11 +691,24 @@ def main():
     print(f"  参考值: 线性粘性 Ed = pi*c*omega*X0^2 = {E_input:.2f} J")
     print("-" * 65)
 
-    # -- Plot ------------------------------------------------------------------
     print("\n正在生成图表 ...")
     plot_all(results, params)
     plot_individual_hysteresis(results, metrics, params)
-    print("完成。\n")
+    print("完成。")
+
+    # =========================================================================
+    #  工况2: 扫频激励
+    # =========================================================================
+    run_chirp_sweep(c, k, alpha, A_bw, beta_bw, gamma_bw, n_bw)
+
+    # =========================================================================
+    #  工况3: 多频率对比
+    # =========================================================================
+    run_multi_freq(c, k, alpha, A_bw, beta_bw, gamma_bw, n_bw)
+
+    print("\n" + "=" * 65)
+    print("  所有工况完成。")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
